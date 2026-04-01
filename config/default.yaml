@@ -1,0 +1,50 @@
+data:
+  gcs_bucket: "gs://weatherbench2"
+  era5_path: "datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+  ifs_ens_path: "datasets/ens-forecasts-ifs/2018-2022_0012_0p5_bilinear.zarr"
+  local_cache_dir: "./cache"
+  year: 2021
+  region:
+    lat_min: 35.0
+    lat_max: 72.0
+    lon_min: -12.0
+    lon_max: 42.0
+    resolution: 1.5
+  variables:
+    - name: "2m_temperature"
+      short: "t2m"
+    - name: "10m_wind_speed"
+      short: "ws10"
+  lead_times_hours: [24, 48, 72, 120, 168]
+
+omniprediction:
+  quantile_levels: [0.1, 0.3, 0.5, 0.7, 0.9]
+  epsilon: 0.01
+  eta: 0.01
+  max_iterations: 1000
+
+tasks:
+  frost_protection:
+    theta_grid: [-4.0, -2.0, 0.0, 2.0, 4.0]
+    c_ratio_grid: [0.2, 0.4, 0.6, 0.8]
+    scale: 10.0
+    transition_width: 3.0
+  heat_protection:
+    theta_grid: [30.0, 32.0, 34.0, 36.0, 38.0]
+    c_ratio_grid: [0.2, 0.4, 0.6, 0.8]
+    scale: 10.0
+    transition_width: 3.0
+  wind_power:
+    v_cutin: 3.0
+    v_rated: 13.0
+    v_cutoff: 23.0
+    alpha_hellmann: 0.143
+    hub_height: 120.0
+    measurement_height: 10.0
+    u_pen_grid: [2.0, 3.0, 4.0]
+    n_dispatch_fractions: 10
+
+arches:
+  model_name: "openclimatefix/ArchesWeatherGen"
+  n_samples: 50
+  local_zarr: "./cache/arches_forecasts.zarr"
