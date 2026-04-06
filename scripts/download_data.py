@@ -1,5 +1,6 @@
 """Download IFS ENS and ERA5 data from GCS to local zarr cache."""
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -14,7 +15,12 @@ from data.loader import load_era5, load_ifs_ens
 
 
 def main():
-    config_path = Path(__file__).parent.parent / "config" / "default.yaml"
+    config_path = Path(
+        os.environ.get(
+            "OMNI_CONFIG",
+            Path(__file__).parent.parent / "config" / "default.yaml",
+        )
+    )
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -23,6 +29,8 @@ def main():
 
     region = cfg["data"]["region"]
     year = cfg["data"]["year"]
+    time_start = cfg["data"].get("time_start")
+    time_stop = cfg["data"].get("time_stop")
     var_names = [v["name"] for v in cfg["data"]["variables"]]
     lead_times = cfg["data"]["lead_times_hours"]
 
@@ -32,6 +40,8 @@ def main():
         variables=var_names,
         year=year,
         region=region,
+        time_start=time_start,
+        time_stop=time_stop,
         local_cache=cache_dir,
     )
     logger.info(f"ERA5: {era5}")
@@ -43,6 +53,8 @@ def main():
         year=year,
         region=region,
         lead_times_hours=lead_times,
+        time_start=time_start,
+        time_stop=time_stop,
         local_cache=cache_dir,
     )
     logger.info(f"IFS ENS: {ifs}")

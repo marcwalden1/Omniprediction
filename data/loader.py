@@ -1,13 +1,86 @@
 """WeatherBench2 GCS data loading with local caching."""
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 import numpy as np
 import xarray as xr
 import zarr
 import gcsfs
+import certifi
+from google.auth.exceptions import DefaultCredentialsError
 
 logger = logging.getLogger(__name__)
+
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+
+
+def _open_gcs_mapper(full_path: str):
+    """Open a public GCS path, preferring ADC when available and falling back to anon."""
+    try:
+        fs = gcsfs.GCSFileSystem(token="google_default")
+    except DefaultCredentialsError:
+        logger.info("Google ADC not found; retrying GCS access anonymously.")
+        fs = gcsfs.GCSFileSystem(token="anon")
+    return fs.get_mapper(full_path)
+
+
+def _maybe_disable_cache(local_cache: Optional[Path]) -> Optional[Path]:
+    """Allow smoke runs to bypass local cache writes and reads."""
+    if os.environ.get("OMNI_DISABLE_CACHE") == "1":
+        return None
+    return local_cache
+
+
+def _normalize_longitude_coord(ds: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    lon_name = "longitude" if "longitude" in ds.coords else "lon"
+    if lon_name not in ds.coords:
+        return ds
+    normalized = (((ds[lon_name] + 180.0) % 360.0) - 180.0).astype(np.float32)
+    return ds.assign_coords({lon_name: normalized}).sortby(lon_name)
+
+
+def _target_region_coords(region: dict) -> tuple[np.ndarray, np.ndarray]:
+    resolution = float(region.get("resolution", 0.25))
+    lats = np.arange(region["lat_max"], region["lat_min"] - 1e-6, -resolution, dtype=np.float32)
+    lons = np.arange(region["lon_min"], region["lon_max"] + 1e-6, resolution, dtype=np.float32)
+    return lats, lons
+
+
+def _cache_suffix(region: dict, time_start: Optional[str], time_stop: Optional[str]) -> str:
+    resolution = str(region.get("resolution", 0.25)).replace(".", "p")
+    start = (time_start or "full").replace(":", "").replace("-", "")
+    stop = (time_stop or "full").replace(":", "").replace("-", "")
+    return f"r{resolution}_{start}_{stop}"
+
+
+def _select_region(ds: xr.Dataset, region: dict) -> xr.Dataset:
+    ds = _normalize_longitude_coord(ds)
+    lat_name = "latitude" if "latitude" in ds.coords else "lat"
+    lon_name = "longitude" if "longitude" in ds.coords else "lon"
+
+    lat = ds[lat_name].values
+    if lat[0] > lat[-1]:
+        ds = ds.sel(
+            {
+                lat_name: slice(region["lat_max"], region["lat_min"]),
+                lon_name: slice(region["lon_min"], region["lon_max"]),
+            }
+        )
+    else:
+        ds = ds.sel(
+            {
+                lat_name: slice(region["lat_min"], region["lat_max"]),
+                lon_name: slice(region["lon_min"], region["lon_max"]),
+            }
+        )
+    target_lats, target_lons = _target_region_coords(region)
+    try:
+        ds = ds.sel({lat_name: target_lats, lon_name: target_lons}, method="nearest")
+    except Exception:
+        ds = ds.interp({lat_name: target_lats, lon_name: target_lons})
+    return ds
 
 
 def get_europe_slice(lat_min=35.0, lat_max=72.0, lon_min=-12.0, lon_max=42.0):
@@ -22,10 +95,14 @@ def load_era5(
     variables: list[str],
     year: int,
     region: dict,
+    time_start: Optional[str] = None,
+    time_stop: Optional[str] = None,
     local_cache: Optional[Path] = None,
 ) -> xr.Dataset:
     """Load ERA5 ground truth from GCS or local cache."""
-    cache_path = local_cache / f"era5_{year}.zarr" if local_cache else None
+    local_cache = _maybe_disable_cache(local_cache)
+    suffix = _cache_suffix(region, time_start, time_stop)
+    cache_path = local_cache / f"era5_{year}_{suffix}_zarr2.zarr" if local_cache else None
     if cache_path and cache_path.exists():
         logger.info(f"Loading ERA5 from cache: {cache_path}")
         return xr.open_zarr(str(cache_path))
@@ -33,26 +110,13 @@ def load_era5(
     # Prepend bucket name if not already a full gs:// path
     full_path = gcs_path if gcs_path.startswith("gs://") else f"gs://weatherbench2/{gcs_path}"
     logger.info(f"Streaming ERA5 from GCS: {full_path}")
-    fs = gcsfs.GCSFileSystem(token="google_default")
-    mapper = fs.get_mapper(full_path)
+    mapper = _open_gcs_mapper(full_path)
     ds = xr.open_zarr(mapper, consolidated=True)
 
     # Select year
     ds = ds.sel(time=str(year))
-
-    # Select region — handle both N→S and S→N latitude ordering
-    lat = ds.latitude.values
-    if lat[0] > lat[-1]:
-        region_sel = dict(
-            latitude=slice(region["lat_max"], region["lat_min"]),
-            longitude=slice(region["lon_min"], region["lon_max"]),
-        )
-    else:
-        region_sel = dict(
-            latitude=slice(region["lat_min"], region["lat_max"]),
-            longitude=slice(region["lon_min"], region["lon_max"]),
-        )
-    ds = ds.sel(**region_sel)
+    if time_start or time_stop:
+        ds = ds.sel(time=slice(time_start or None, time_stop or None))
 
     # Keep only requested variables (map friendly names)
     var_map = {
@@ -68,12 +132,12 @@ def load_era5(
             if alias in available:
                 keep.append(alias)
                 break
-    ds = ds[keep]
+    ds = _select_region(ds[keep], region)
 
     if cache_path:
         logger.info(f"Caching ERA5 to {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        ds.to_zarr(str(cache_path))
+        ds.to_zarr(str(cache_path), zarr_version=2)
 
     return ds
 
@@ -84,24 +148,29 @@ def load_ifs_ens(
     year: int,
     region: dict,
     lead_times_hours: list[int],
+    time_start: Optional[str] = None,
+    time_stop: Optional[str] = None,
     local_cache: Optional[Path] = None,
 ) -> xr.Dataset:
     """Load IFS ENS forecasts from GCS or local cache."""
-    cache_path = local_cache / f"ifs_ens_{year}.zarr" if local_cache else None
+    local_cache = _maybe_disable_cache(local_cache)
+    suffix = _cache_suffix(region, time_start, time_stop)
+    cache_path = local_cache / f"ifs_ens_{year}_{suffix}_zarr2.zarr" if local_cache else None
     if cache_path and cache_path.exists():
         logger.info(f"Loading IFS ENS from cache: {cache_path}")
         return xr.open_zarr(str(cache_path))
 
     full_path = gcs_path if gcs_path.startswith("gs://") else f"gs://weatherbench2/{gcs_path}"
     logger.info(f"Streaming IFS ENS from GCS: {full_path}")
-    fs = gcsfs.GCSFileSystem(token="google_default")
-    mapper = fs.get_mapper(full_path)
+    mapper = _open_gcs_mapper(full_path)
     ds = xr.open_zarr(mapper, consolidated=True)
 
     # Select year
     init_times = ds.time.values
     mask = np.array([str(t)[:4] == str(year) for t in init_times])
     ds = ds.isel(time=np.where(mask)[0])
+    if time_start or time_stop:
+        ds = ds.sel(time=slice(time_start or None, time_stop or None))
 
     # Select lead times
     if "step" in ds.coords:
@@ -111,24 +180,12 @@ def load_ifs_ens(
         steps = [np.timedelta64(h, "h") for h in lead_times_hours]
         ds = ds.sel(prediction_timedelta=steps)
 
-    # Select region
-    lat = ds.latitude.values if "latitude" in ds.coords else ds.lat.values
-    if lat[0] > lat[-1]:
-        region_sel = dict(
-            latitude=slice(region["lat_max"], region["lat_min"]),
-            longitude=slice(region["lon_min"], region["lon_max"]),
-        )
-    else:
-        region_sel = dict(
-            latitude=slice(region["lat_min"], region["lat_max"]),
-            longitude=slice(region["lon_min"], region["lon_max"]),
-        )
-    ds = ds.sel(**region_sel)
+    ds = _select_region(ds[variables], region)
 
     if cache_path:
         logger.info(f"Caching IFS ENS to {cache_path}")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        ds.to_zarr(str(cache_path))
+        ds.to_zarr(str(cache_path), zarr_version=2)
 
     return ds
 

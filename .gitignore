@@ -8,3 +8,16 @@ __pycache__/
 *.zarr
 figures/
 .env
+
+# Local environments and caches
+.venv/
+.cache/
+.mplconfig/
+
+# Run outputs
+cache_smoke/
+cache_arches_quick/
+logs/
+
+# Model weights (3 GB; transferred separately, not via git)
+modelstore/

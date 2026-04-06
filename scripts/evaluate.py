@@ -1,5 +1,6 @@
 """Produce all metrics and figures."""
 import logging
+import os
 import sys
 from pathlib import Path
 import pickle
@@ -20,7 +21,12 @@ from plots.figures import plot_ranking_heatmap, plot_convergence, plot_crps_comp
 
 
 def main():
-    config_path = Path(__file__).parent.parent / "config" / "default.yaml"
+    config_path = Path(
+        os.environ.get(
+            "OMNI_CONFIG",
+            Path(__file__).parent.parent / "config" / "default.yaml",
+        )
+    )
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 

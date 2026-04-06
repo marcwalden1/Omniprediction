@@ -1,5 +1,6 @@
 """Train OmniPredictor for each (variable, lead_time)."""
 import logging
+import os
 import sys
 from pathlib import Path
 import pickle
@@ -20,7 +21,12 @@ from omniprediction.algorithm import run_omniprediction
 
 
 def main():
-    config_path = Path(__file__).parent.parent / "config" / "default.yaml"
+    config_path = Path(
+        os.environ.get(
+            "OMNI_CONFIG",
+            Path(__file__).parent.parent / "config" / "default.yaml",
+        )
+    )
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -34,6 +40,8 @@ def main():
     max_iter = cfg["omniprediction"]["max_iterations"]
     var_names = [v["name"] for v in cfg["data"]["variables"]]
     lead_times = cfg["data"]["lead_times_hours"]
+    time_start = cfg["data"].get("time_start")
+    time_stop = cfg["data"].get("time_stop")
     arches_zarr = cfg["arches"]["local_zarr"]
 
     # Build tasks
@@ -71,6 +79,8 @@ def main():
         variables=var_names,
         year=cfg["data"]["year"],
         region=cfg["data"]["region"],
+        time_start=time_start,
+        time_stop=time_stop,
         local_cache=cache_dir,
     )
     ifs_ds = load_ifs_ens(
@@ -79,6 +89,8 @@ def main():
         year=cfg["data"]["year"],
         region=cfg["data"]["region"],
         lead_times_hours=lead_times,
+        time_start=time_start,
+        time_stop=time_stop,
         local_cache=cache_dir,
     )
 
@@ -104,16 +116,22 @@ def main():
 
             # Load Arches quantiles
             try:
-                p_arches_norm = load_arches_quantiles(arches_zarr, var, quantile_levels)
-                # Trim/pad to match N
+                p_arches_norm = load_arches_quantiles(
+                    arches_zarr,
+                    var,
+                    quantile_levels,
+                    lead_time_hours=lt,
+                )
                 if p_arches_norm.shape[0] != p_ifs_norm.shape[0]:
-                    n = min(p_arches_norm.shape[0], p_ifs_norm.shape[0])
-                    p_arches_norm = p_arches_norm[:n]
-                    p_ifs_norm = p_ifs_norm[:n]
-                    y_obs_norm = y_obs_norm[:n]
+                    raise ValueError(
+                        "Arches and IFS sample counts differ for "
+                        f"{var} {lt}h: {p_arches_norm.shape[0]} vs {p_ifs_norm.shape[0]}"
+                    )
             except Exception as e:
-                logger.warning(f"Arches load failed ({e}), using IFS as Arches fallback.")
-                p_arches_norm = p_ifs_norm.copy()
+                raise RuntimeError(
+                    f"Failed to load Arches quantiles for {var} {lt}h from {arches_zarr!r}: {e}. "
+                    "Run scripts/run_arches.py first to generate the Arches forecast cache."
+                ) from e
 
             # Only use tasks relevant to the variable
             if "wind" in var.lower() or "ws" in var.lower():

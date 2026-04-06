@@ -1,5 +1,6 @@
 """One-time ArchesWeatherGen inference — GPU recommended."""
 import logging
+import os
 import sys
 from pathlib import Path
 import yaml
@@ -13,12 +14,19 @@ from data.loader import load_ifs_ens
 
 
 def main():
-    config_path = Path(__file__).parent.parent / "config" / "default.yaml"
+    config_path = Path(
+        os.environ.get(
+            "OMNI_CONFIG",
+            Path(__file__).parent.parent / "config" / "default.yaml",
+        )
+    )
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
     cache_dir = Path(cfg["data"]["local_cache_dir"])
     var_names = [v["name"] for v in cfg["data"]["variables"]]
+    time_start = cfg["data"].get("time_start")
+    time_stop = cfg["data"].get("time_stop")
 
     logger.info("Loading IFS ENS for Arches conditioning...")
     ifs_ds = load_ifs_ens(
@@ -27,6 +35,8 @@ def main():
         year=cfg["data"]["year"],
         region=cfg["data"]["region"],
         lead_times_hours=cfg["data"]["lead_times_hours"],
+        time_start=time_start,
+        time_stop=time_stop,
         local_cache=cache_dir,
     )
 
@@ -39,6 +49,9 @@ def main():
         n_samples=cfg["arches"]["n_samples"],
         output_zarr=output_zarr,
         model_name=cfg["arches"]["model_name"],
+        region=cfg["data"]["region"],
+        time_start=time_start,
+        time_stop=time_stop,
     )
     logger.info("Arches inference done.")
 
