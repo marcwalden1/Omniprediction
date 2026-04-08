@@ -115,7 +115,7 @@ def _load_era5_init_states(
         ds = ds.sel(
             time=slice(
                 pd.Timestamp(time_start) - pd.Timedelta(hours=24) if time_start else None,
-                pd.Timestamp(time_stop) if time_stop else None,
+                pd.Timestamp(time_stop) + pd.Timedelta(days=1) if time_stop else None,
             )
         )
     ds = ds.sel(time=all_times, method="nearest")
