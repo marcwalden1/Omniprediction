@@ -4,51 +4,31 @@ import numpy as np
 
 
 class DecisionTask(ABC):
-    """Abstract decision task with cost function and ΔL."""
+    """Abstract decision task exposing k_ell (optimal action) and delta_L (loss gradient)."""
 
-    @property
-    @abstractmethod
-    def n_actions(self) -> int:
-        """Number of discrete actions."""
-
-    @property
-    @abstractmethod
-    def param_grid(self) -> list[dict]:
-        """List of (θ, c_ratio) parameter dicts for this task."""
+    def __init__(self, tau: np.ndarray):
+        self.tau = tau  # (d,) grid in normalized space
 
     @abstractmethod
-    def cost(self, action: int, y: np.ndarray, params: dict) -> np.ndarray:
+    def k_ell(self, p: np.ndarray) -> np.ndarray:
         """
-        Cost of taking `action` when observation is y.
+        Compute optimal action per sample given exceedance-probability prediction.
 
         Args:
-            action: integer action index
-            y: observations (N,) in original units
-            params: task parameters (θ, c_ratio, etc.)
+            p: (N, d) exceedance probabilities
 
         Returns:
-            costs: (N,) array
+            actions: (N,) integer action indices
         """
 
-    def optimal_action(self, expected_costs: np.ndarray) -> int:
-        """Return action with minimum expected cost. Shape: (n_actions,)."""
-        return int(np.argmin(expected_costs))
-
-    def delta_L(
-        self,
-        y_obs: np.ndarray,
-        action: int,
-        params: dict,
-    ) -> np.ndarray:
+    @abstractmethod
+    def delta_L(self, k: np.ndarray) -> np.ndarray:
         """
-        ΔL(y, θ, c; action=k) = cost(1, y) - cost(0, y) evaluated at action k.
+        Compute loss-gradient weight vector given actions.
 
-        For binary tasks: cost(protect, y) - cost(no-protect, y).
-        For multi-action: cost(action, y) - cost(best_other_action, y).
+        Args:
+            k: (N,) action indices
 
-        Returns scalar-like array broadcast to (N,).
+        Returns:
+            weights: (N, d)
         """
-        # Default: binary difference
-        c1 = self.cost(1, y_obs, params)
-        c0 = self.cost(0, y_obs, params)
-        return c1 - c0

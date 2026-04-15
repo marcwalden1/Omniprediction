@@ -18,7 +18,8 @@ data:
   lead_times_hours: [24]
 
 omniprediction:
-  quantile_levels: [0.1, 0.3, 0.5, 0.7, 0.9]
+  lam: 0.1
+  d: 20
   epsilon: 0.01
   eta: 0.01
   max_iterations: 5

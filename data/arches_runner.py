@@ -407,3 +407,34 @@ def load_arches_quantiles(
     samples = da.values
     qs = np.quantile(samples, quantile_levels, axis=-1)
     return qs.reshape(len(quantile_levels), -1).T
+
+
+def load_arches_exceedance_probs(
+    zarr_path: str,
+    variable: str,
+    tau: np.ndarray,
+    lead_time_hours: int,
+    normalizer,
+) -> np.ndarray:
+    """
+    Load lead-specific Arches samples and compute exceedance probabilities → (N, d).
+
+    Args:
+        zarr_path: path to Arches forecast zarr
+        variable: variable name (e.g. "2m_temperature")
+        tau: (d,) threshold values in normalized space
+        lead_time_hours: lead time in hours
+        normalizer: Normalizer instance to convert samples to normalized space
+
+    Returns:
+        (N, d) float64 exceedance probabilities
+    """
+    ds = xr.open_zarr(zarr_path)
+    step_dim = "step" if "step" in ds.coords else "prediction_timedelta"
+    da = ds[variable].sel({step_dim: np.timedelta64(lead_time_hours, "h")})
+    samples = da.values  # (..., member) — last dim is member
+    n_members = samples.shape[-1]
+    samples_2d = samples.reshape(-1, n_members)  # (N, n_members)
+    samples_norm = normalizer.normalize(samples_2d)  # (N, n_members)
+    exceedance = (samples_norm[:, :, np.newaxis] >= tau[np.newaxis, np.newaxis, :]).mean(axis=1)
+    return exceedance.astype(np.float64)

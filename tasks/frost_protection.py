@@ -1,6 +1,5 @@
 """Frost protection binary decision task."""
 import numpy as np
-from itertools import product
 from tasks.base import DecisionTask
 
 
@@ -8,50 +7,37 @@ class FrostProtection(DecisionTask):
     """
     Binary: protect crops (action=1) or not (action=0).
 
-    cost(protect=1, y): 0 if y≤θ; (1-c)*scale if y≥θ+w; linear between.
-    cost(protect=0, y): c*scale if y≤θ; 0 if y≥θ+w; linear between.
+    phi(y) = clip((y - theta) / width, 0, 1)
+    delta_phi_k = phi(tau_k) - phi(tau_{k-1}),  phi(tau_{-1}) = 0
+
+    k_ell(p): inner = <p, delta_phi>;  k = 1[inner > c]
+    delta_L(k): scale * [(1-c)*k - c*(1-k)] * delta_phi   shape (N, d)
     """
 
     def __init__(
         self,
-        theta_grid=None,
-        c_ratio_grid=None,
-        scale: float = 10.0,
-        transition_width: float = 3.0,
+        theta: float,
+        c_ratio: float,
+        scale: float,
+        transition_width: float,
+        tau: np.ndarray,
     ):
-        self._theta_grid = theta_grid or [-4.0, -2.0, 0.0, 2.0, 4.0]
-        self._c_ratio_grid = c_ratio_grid or [0.2, 0.4, 0.6, 0.8]
+        super().__init__(tau)
+        self.theta = theta
+        self.c_ratio = c_ratio
         self.scale = scale
         self.transition_width = transition_width
 
-    @property
-    def n_actions(self) -> int:
-        return 2
+        phi = np.clip((tau - theta) / transition_width, 0.0, 1.0)
+        self.delta_phi = np.diff(phi, prepend=0.0)  # (d,)
 
-    @property
-    def param_grid(self) -> list[dict]:
-        return [
-            {"theta": th, "c_ratio": c}
-            for th, c in product(self._theta_grid, self._c_ratio_grid)
-        ]
+    def k_ell(self, p: np.ndarray) -> np.ndarray:
+        """Return 1 if inner > c_ratio, else 0.  Shape (N,)."""
+        inner = p @ self.delta_phi  # (N,)
+        return (inner > self.c_ratio).astype(np.int32)
 
-    def cost(self, action: int, y: np.ndarray, params: dict) -> np.ndarray:
-        theta = params["theta"]
-        c = params["c_ratio"]
-        w = self.transition_width
-        s = self.scale
-
-        y = np.asarray(y, dtype=float)
-        # Linear interpolation factor in [0, 1]
-        frac = np.clip((y - theta) / w, 0.0, 1.0)
-
-        if action == 1:  # protect
-            # 0 at y≤θ, (1-c)*s at y≥θ+w, linear between
-            return (1.0 - c) * s * frac
-        else:  # no protect
-            # c*s at y≤θ, 0 at y≥θ+w, linear between
-            return c * s * (1.0 - frac)
-
-    def delta_L(self, y_obs: np.ndarray, action: int, params: dict) -> np.ndarray:
-        """ΔL = cost(action=1, y) - cost(action=0, y), broadcast to (N,)."""
-        return self.cost(1, y_obs, params) - self.cost(0, y_obs, params)
+    def delta_L(self, k: np.ndarray) -> np.ndarray:
+        """ΔL_i = scale * [(1-c)*k_i - c*(1-k_i)] * delta_phi   shape (N, d)."""
+        k = np.asarray(k, dtype=float)
+        coeff = self.scale * ((1.0 - self.c_ratio) * k - self.c_ratio * (1.0 - k))  # (N,)
+        return coeff[:, np.newaxis] * self.delta_phi  # (N, d)

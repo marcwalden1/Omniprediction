@@ -218,6 +218,44 @@ def extract_quantiles(
     return qs
 
 
+def extract_exceedance_probs(
+    ens_da: xr.DataArray,
+    tau: np.ndarray,
+    normalizer,
+) -> np.ndarray:
+    """
+    Compute exceedance probabilities from ensemble DataArray.
+
+    For each sample and threshold τ_k, returns the fraction of ensemble
+    members whose normalized value exceeds τ_k.
+
+    Args:
+        ens_da: DataArray with a member/number/realization dimension
+        tau: (d,) threshold values in normalized space
+        normalizer: Normalizer instance with .normalize() method
+
+    Returns:
+        (N, d) float64 array where N = product of non-member dims
+    """
+    member_dim = None
+    for dim in ens_da.dims:
+        if any(k in dim for k in ("member", "number", "realization")):
+            member_dim = dim
+            break
+    if member_dim is None:
+        raise ValueError(f"No member dimension found in {ens_da.dims}")
+
+    member_axis = list(ens_da.dims).index(member_dim)
+    values = np.moveaxis(ens_da.values, member_axis, -1)  # (..., n_members)
+    n_members = values.shape[-1]
+    values_2d = values.reshape(-1, n_members)  # (N, n_members)
+
+    values_norm = normalizer.normalize(values_2d)  # (N, n_members)
+    # (N, n_members, 1) >= (1, 1, d) → mean over members axis
+    exceedance = (values_norm[:, :, np.newaxis] >= tau[np.newaxis, np.newaxis, :]).mean(axis=1)
+    return exceedance.astype(np.float64)
+
+
 def align_obs_and_forecasts(
     era5_ds: xr.Dataset,
     ifs_ds: xr.Dataset,

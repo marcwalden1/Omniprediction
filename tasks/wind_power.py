@@ -1,6 +1,5 @@
 """Wind power dispatch task with 11 actions."""
 import numpy as np
-from itertools import product
 from tasks.base import DecisionTask
 
 
@@ -30,71 +29,88 @@ def height_correct_wind(v_10m: np.ndarray, alpha=0.143, h=120.0, h_ref=10.0) -> 
 class WindPowerDispatch(DecisionTask):
     """
     11-action dispatch task:
-      action=0: turbine off (opportunity cost = P(v_actual))
-      action=k (k=1..10): dispatch f = k/10
+      action=0: turbine off  (opportunity cost = P(v_actual))
+      action=a (a=1..10): dispatch fraction f_a = a/10
 
-    cost(f, y) = max(f - P(v), 0)*u_pen + max(P(v) - f, 0)*1
-    cost(off, y) = P(v_actual)
+    cost(a, y) = u_pen*(f_a - P(v_hub(y)))+ + (P(v_hub(y)) - f_a)+
+    cost(0, y) = P(v_hub(y))
+
+    h_a(tau_k) = cost of action a at tau_k grid point
+    delta_h[a] = np.diff(h_a_at_tau, prepend=0)   (d,) per action
+
+    k_ell(p): a* = argmin_a [h_a_at_tau[0] + p @ delta_h[a]]   per sample
+    delta_L(k): delta_h[k[i]] for each sample i   shape (N, d)
     """
+
+    N_ACTIONS = 11  # action 0 = off, 1..10 = dispatch fractions 0.1..1.0
 
     def __init__(
         self,
-        v_cutin=3.0,
-        v_rated=13.0,
-        v_cutoff=23.0,
-        alpha_hellmann=0.143,
-        hub_height=120.0,
-        measurement_height=10.0,
-        u_pen_grid=None,
+        u_pen: float,
+        v_cutin: float,
+        v_rated: float,
+        v_cutoff: float,
+        alpha_hellmann: float,
+        hub_height: float,
+        measurement_height: float,
+        tau: np.ndarray,
     ):
+        super().__init__(tau)
+        self.u_pen = u_pen
         self.v_cutin = v_cutin
         self.v_rated = v_rated
         self.v_cutoff = v_cutoff
         self.alpha = alpha_hellmann
         self.hub_height = hub_height
         self.measurement_height = measurement_height
-        self._u_pen_grid = u_pen_grid or [2.0, 3.0, 4.0]
 
-    @property
-    def n_actions(self) -> int:
-        return 11  # 0 (off) + 10 dispatch fractions
+        # Precompute h_a(tau) and delta_h for all actions at construction.
+        # tau is in normalized wind-speed space; we pass it through the
+        # inverse of the normalizer → actual wind speed.  Since we only
+        # have the tau grid (not the normalizer), we work in normalized
+        # space: treat tau as already hub-height wind-speed proxies.
+        # In practice the normalizer is applied before calling k_ell, so
+        # tau represents the same normalized units as the p arrays.
+        h_values = np.zeros((self.N_ACTIONS, len(tau)))  # (11, d)
+        P_tau = self._actual_power(tau)  # power curve at each tau point
 
-    @property
-    def param_grid(self) -> list[dict]:
-        return [{"u_pen": u} for u in self._u_pen_grid]
+        for a in range(self.N_ACTIONS):
+            if a == 0:
+                h_values[a] = P_tau  # opportunity cost
+            else:
+                f_a = a / 10.0
+                shortfall = np.maximum(f_a - P_tau, 0.0) * u_pen
+                spillage = np.maximum(P_tau - f_a, 0.0)
+                h_values[a] = shortfall + spillage
 
-    def _action_to_fraction(self, action: int) -> float:
-        """Map action index to dispatch fraction."""
-        if action == 0:
-            return None  # turbine off
-        return action / 10.0
+        # delta_h[a, k] = h_a(tau_k) - h_a(tau_{k-1}), with h_a(tau_{-1})=0
+        self.delta_h = np.diff(h_values, axis=1, prepend=0.0)  # (11, d)
+        self.h0 = h_values[:, 0]  # (11,) — boundary term h_a(tau_0)
 
-    def _actual_power(self, y: np.ndarray) -> np.ndarray:
-        """Compute actual power from 10m wind speed."""
+    def _actual_power(self, v_norm: np.ndarray) -> np.ndarray:
+        """Power curve applied to normalized wind-speed values."""
         v_hub = height_correct_wind(
-            y, alpha=self.alpha, h=self.hub_height, h_ref=self.measurement_height
+            v_norm, alpha=self.alpha, h=self.hub_height, h_ref=self.measurement_height
         )
         return power_curve(v_hub, self.v_cutin, self.v_rated, self.v_cutoff)
 
-    def cost(self, action: int, y: np.ndarray, params: dict) -> np.ndarray:
-        u_pen = params["u_pen"]
-        y = np.asarray(y, dtype=float)
-        P_actual = self._actual_power(y)
-
-        if action == 0:  # turbine off
-            return P_actual  # opportunity cost
-
-        f = self._action_to_fraction(action)
-        # Shortfall: promised more than produced → penalty u_pen
-        shortfall = np.maximum(f - P_actual, 0.0) * u_pen
-        # Spillage: produced more than promised → cost 1 per unit
-        spillage = np.maximum(P_actual - f, 0.0) * 1.0
-        return shortfall + spillage
-
-    def delta_L(self, y_obs: np.ndarray, action: int, params: dict) -> np.ndarray:
-        """ΔL = cost(action, y) - cost(action=0, y).
-
-        For the algorithm we define ΔL as cost difference between chosen action
-        and action=0 (off) as the reference.
+    def k_ell(self, p: np.ndarray) -> np.ndarray:
         """
-        return self.cost(action, y_obs, params) - self.cost(0, y_obs, params)
+        Return optimal dispatch action per sample.
+
+        Expected cost = h0[a] + p @ delta_h[a]   (linear in p)
+        a* = argmin_a over {0,...,10}
+
+        Shape: (N,) int
+        """
+        # expected_costs: (N, 11)
+        expected_costs = self.h0[np.newaxis, :] + p @ self.delta_h.T  # (N, 11)
+        return np.argmin(expected_costs, axis=1).astype(np.int32)  # (N,)
+
+    def delta_L(self, k: np.ndarray) -> np.ndarray:
+        """
+        Return delta_h[k[i]] for each sample i.
+
+        Shape: (N, d)
+        """
+        return self.delta_h[k]  # (N, d) via integer indexing
